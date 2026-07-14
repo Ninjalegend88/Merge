@@ -1,6 +1,37 @@
 -- Drag to Combine | Auto Merge Script
 -- Key: Zkiller
--- Uses Rayfield UI Library
+
+-- ─── ANTI-CHEAT BYPASS ──────────────────────────────────────────────────
+
+local function BypassAntiCheat()
+    pcall(function()
+        local oldKick = game.Players.LocalPlayer.Kick
+        game.Players.LocalPlayer.Kick = function(self, msg)
+            if msg and (msg:find("tamper") or msg:find("cheat") or msg:find("exploit") or msg:find("detect") or msg:find("ban")) then
+                warn("[AC] Blocked kick: " .. msg)
+                return
+            end
+            return oldKick(self, msg)
+        end
+        
+        local acNames = {"AntiCheat", "BanEvent", "DetectionEvent", "ReportEvent", "KickEvent", "LogEvent", "Watchdog", "SecurityCheck", "FileIntegrityCheck", "IntegrityCheck", "HashCheck"}
+        for _, name in ipairs(acNames) do
+            local r = game.ReplicatedStorage:FindFirstChild(name)
+            if r then r:Destroy() end
+        end
+        
+        for i, v in ipairs(game:GetDescendants()) do
+            if v:IsA("Script") or v:IsA("LocalScript") then
+                local name = v.Name:lower()
+                if name:find("anticheat") or name:find("watchdog") or name:find("security") or name:find("detect") then
+                    v.Disabled = true
+                end
+            end
+        end
+    end)
+end
+
+BypassAntiCheat()
 
 -- ─── LOAD RAYFIELD ──────────────────────────────────────────────────────
 
@@ -35,182 +66,73 @@ local TweenService = game:GetService("TweenService")
 local UserInputService = game:GetService("UserInputService")
 local Workspace = game:GetService("Workspace")
 local ReplicatedStorage = game:GetService("ReplicatedStorage")
+local Mouse = LP:GetMouse()
 
 -- ─── VARIABLES ───────────────────────────────────────────────────────────
 
 local AutoMergeEnabled = false
 local MergeSpeed = 1
-local CurrentItems = {}
-local ItemList = {}
-local GameBoard = nil
-local Dragging = false
-local Mouse = LP:GetMouse()
-local MergeQueue = {}
 local IsMerging = false
+local DebugMode = false
+local ItemsFound = {}
 
--- ─── FIND GAME BOARD ──────────────────────────────────────────────────
+-- ─── FIND ALL ITEMS ────────────────────────────────────────────────────
 
-local function FindGameBoard()
-    for _, v in ipairs(Workspace:GetDescendants()) do
-        if v:IsA("Model") and v.Name:lower():find("board") or v.Name:lower():find("grid") or v.Name:lower():find("play") then
-            return v
-        end
-    end
-    -- Fallback: find any model with items
-    for _, v in ipairs(Workspace:GetDescendants()) do
-        if v:IsA("Model") and #v:GetChildren() > 5 then
-            return v
-        end
-    end
-    return Workspace
-end
-
-GameBoard = FindGameBoard()
-
--- ─── FIND ITEMS ON BOARD ─────────────────────────────────────────────
-
-local function GetAllItems()
+local function GetAllGameItems()
     local items = {}
-    if GameBoard then
-        for _, v in ipairs(GameBoard:GetDescendants()) do
-            if v:IsA("Model") and v:FindFirstChild("Handle") or v:FindFirstChild("ClickDetector") or v:FindFirstChild("TouchInterest") then
-                table.insert(items, v)
+    local searchRoots = {
+        Workspace,
+        game:GetService("Lighting"),
+        ReplicatedStorage
+    }
+    
+    for _, root in ipairs(searchRoots) do
+        for _, v in ipairs(root:GetDescendants()) do
+            if v:IsA("Model") then
+                -- Check if it has click detector or touch interest (interactable)
+                local hasClick = v:FindFirstChildOfClass("ClickDetector")
+                local hasTouch = v:FindFirstChild("TouchInterest")
+                local hasHandle = v:FindFirstChild("Handle")
+                local hasRoot = v:FindFirstChild("HumanoidRootPart") or v:FindFirstChild("RootPart")
+                
+                if hasClick or hasTouch or hasHandle or hasRoot then
+                    -- Get item type from name or attributes
+                    local tier = v:FindFirstChild("Tier") or v:FindFirstChild("Level") or v:FindFirstChild("Rarity")
+                    local tierValue = tier and tier.Value or 1
+                    local itemType = v.Name:gsub(" %d+", ""):gsub(" Tier %d+", ""):gsub(" Lv%.%d+", "")
+                    
+                    table.insert(items, {
+                        Model = v,
+                        Name = v.Name,
+                        Type = itemType,
+                        Tier = tierValue,
+                        Root = hasRoot or v.PrimaryPart,
+                        ClickDetector = hasClick,
+                        TouchInterest = hasTouch,
+                        Position = hasRoot and hasRoot.Position or v.PrimaryPart and v.PrimaryPart.Position or v:GetPivot().Position
+                    })
+                end
             end
         end
     end
-    for _, v in ipairs(Workspace:GetDescendants()) do
-        if v:IsA("Model") and (v.Name:lower():find("item") or v.Name:lower():find("food") or v.Name:lower():find("resource") or v.Name:lower():find("material")) then
-            table.insert(items, v)
-        end
-    end
+    
     return items
 end
 
-local function GetItemType(item)
-    -- Try to determine item type from name or attributes
-    local name = item.Name:lower()
-    local types = {
-        "wood", "stone", "iron", "gold", "diamond", "emerald", "ruby",
-        "leather", "cloth", "silk", "wool", "cotton",
-        "apple", "berry", "meat", "fish", "bread",
-        "sword", "shield", "helmet", "armor", "boots",
-        "ring", "necklace", "amulet", "crown",
-        "wand", "staff", "bow", "arrow", "spear"
-    }
-    for _, t in ipairs(types) do
-        if name:find(t) then
-            return t
-        end
-    end
-    -- Check for number values indicating tier/level
-    local tier = item:FindFirstChild("Tier") or item:FindFirstChild("Level") or item:FindFirstChild("Value")
-    if tier then
-        return name .. "_" .. tostring(tier.Value)
-    end
-    return name
-end
-
-local function GetItemTier(item)
-    local tier = item:FindFirstChild("Tier") or item:FindFirstChild("Level") or item:FindFirstChild("Value")
-    if tier then
-        return tier.Value
-    end
-    local name = item.Name:lower()
-    local tiers = {"common", "uncommon", "rare", "epic", "legendary", "mythic", "godly"}
-    for i, t in ipairs(tiers) do
-        if name:find(t) then
-            return i
-        end
-    end
-    return 1
-end
-
--- ─── COMBINATION LOGIC ─────────────────────────────────────────────────
-
-local function CanCombine(item1, item2)
-    if item1 == item2 then return false end
-    local type1 = GetItemType(item1)
-    local type2 = GetItemType(item2)
-    if type1 == type2 then
-        local tier1 = GetItemTier(item1)
-        local tier2 = GetItemTier(item2)
-        if tier1 == tier2 then
-            return true
-        end
-    end
-    return false
-end
-
-local function GetCombinationResult(item1, item2)
-    -- Return what the combination would produce
-    local name1 = item1.Name:lower()
-    local name2 = item2.Name:lower()
-    local tier1 = GetItemTier(item1)
-    local tier2 = GetItemTier(item2)
-    
-    -- Try to find result from game objects
-    for _, v in ipairs(Workspace:GetDescendants()) do
-        if v:IsA("Model") and v.Name:lower():find(name1) and v.Name:lower():find("combined") then
-            return v
-        end
-    end
-    
-    -- Create result name based on tier
-    local resultName = name1:gsub(" tier %d+", "") .. " Tier " .. (tier1 + 1)
-    return resultName
-end
-
--- ─── DRAG ITEMS ──────────────────────────────────────────────────────
-
-local function DragItem(item, targetPos)
-    -- Simulate dragging item to target position
-    if not item or not targetPos then return end
-    
-    local root = item:FindFirstChild("HumanoidRootPart") or item:FindFirstChild("RootPart") or item.PrimaryPart
-    if not root then return end
-    
-    -- Tween to target
-    local tweenInfo = TweenInfo.new(0.2 / MergeSpeed, Enum.EasingStyle.Quad, Enum.EasingDirection.Out)
-    local tween = TweenService:Create(root, tweenInfo, {CFrame = CFrame.new(targetPos)})
-    tween:Play()
-    
-    -- Wait for tween to finish
-    tween.Completed:Wait()
-    
-    -- Trigger combine by sending click/input
-    local clickDetector = item:FindFirstChildOfClass("ClickDetector")
-    if clickDetector then
-        fireclickdetector(clickDetector)
-    end
-    
-    -- Check for touch interest
-    local touch = item:FindFirstChild("TouchInterest")
-    if touch then
-        firetouchinterest(root, touch.Parent, 0)
-        firetouchinterest(root, touch.Parent, 1)
-    end
-    
-    return true
-end
-
-local function FindItemPosition(item)
-    local root = item:FindFirstChild("HumanoidRootPart") or item:FindFirstChild("RootPart") or item.PrimaryPart
-    if root then
-        return root.Position
-    end
-    return nil
-end
-
--- ─── AUTO MERGE LOGIC ─────────────────────────────────────────────────
+-- ─── FIND MERGE PAIRS ──────────────────────────────────────────────────
 
 local function FindMergePairs()
-    local items = GetAllItems()
+    local items = GetAllGameItems()
     local pairs = {}
     
     for i = 1, #items do
         for j = i + 1, #items do
-            if CanCombine(items[i], items[j]) then
-                table.insert(pairs, {items[i], items[j]})
+            local a = items[i]
+            local b = items[j]
+            
+            -- Check if same type and same tier
+            if a.Type == b.Type and a.Tier == b.Tier then
+                table.insert(pairs, {a, b})
             end
         end
     end
@@ -218,65 +140,135 @@ local function FindMergePairs()
     return pairs
 end
 
+-- ─── SIMULATE DRAG ─────────────────────────────────────────────────────
+
+local function SimulateDrag(item1, item2)
+    if not item1 or not item2 then return false end
+    
+    local root1 = item1.Root or item1.Model:FindFirstChild("HumanoidRootPart") or item1.Model:FindFirstChild("RootPart") or item1.Model.PrimaryPart
+    local root2 = item2.Root or item2.Model:FindFirstChild("HumanoidRootPart") or item2.Model:FindFirstChild("RootPart") or item2.Model.PrimaryPart
+    
+    if not root1 or not root2 then return false end
+    
+    local pos1 = root1.Position
+    local pos2 = root2.Position
+    local targetPos = pos2 + Vector3.new(0, 2, 0)
+    
+    -- Method 1: Tween the item
+    local tweenInfo = TweenInfo.new(0.15 / MergeSpeed, Enum.EasingStyle.Quad, Enum.EasingDirection.Out)
+    local tween = TweenService:Create(root1, tweenInfo, {CFrame = CFrame.new(targetPos)})
+    tween:Play()
+    tween.Completed:Wait()
+    
+    -- Method 2: Fire click detector if exists
+    if item1.ClickDetector then
+        fireclickdetector(item1.ClickDetector)
+        task.wait(0.05)
+    end
+    if item2.ClickDetector then
+        fireclickdetector(item2.ClickDetector)
+        task.wait(0.05)
+    end
+    
+    -- Method 3: Simulate touch
+    if root1 and root2 then
+        local touch1 = root1:FindFirstChild("TouchInterest")
+        local touch2 = root2:FindFirstChild("TouchInterest")
+        
+        if touch1 then
+            firetouchinterest(root1, root2.Parent, 0)
+            firetouchinterest(root1, root2.Parent, 1)
+        end
+        if touch2 then
+            firetouchinterest(root2, root1.Parent, 0)
+            firetouchinterest(root2, root1.Parent, 1)
+        end
+    end
+    
+    -- Method 4: Fire remote if exists
+    for _, remote in ipairs(ReplicatedStorage:GetDescendants()) do
+        if remote:IsA("RemoteEvent") then
+            local name = remote.Name:lower()
+            if name:find("merge") or name:find("combine") or name:find("craft") then
+                pcall(function()
+                    remote:FireServer(item1.Model, item2.Model)
+                end)
+            end
+        end
+    end
+    
+    return true
+end
+
+-- ─── AUTO MERGE LOOP ──────────────────────────────────────────────────
+
 local function ProcessMerges()
     if IsMerging then return end
     IsMerging = true
     
     local attempts = 0
-    local maxAttempts = 50
+    local maxAttempts = 100
     
     while AutoMergeEnabled and attempts < maxAttempts do
         local pairs = FindMergePairs()
+        
         if #pairs == 0 then
+            if DebugMode then
+                print("[Merge] No more mergeable items found")
+            end
             break
+        end
+        
+        if DebugMode then
+            print("[Merge] Found " .. #pairs .. " mergeable pairs")
         end
         
         for _, pair in ipairs(pairs) do
             if not AutoMergeEnabled then break end
             
             local item1, item2 = pair[1], pair[2]
-            local pos1 = FindItemPosition(item1)
-            local pos2 = FindItemPosition(item2)
             
-            if pos1 and pos2 then
-                -- Drag item1 to item2's position
-                local success = DragItem(item1, pos2)
-                if success then
-                    wait(0.1 / MergeSpeed)
-                end
+            if DebugMode then
+                print("[Merge] Merging: " .. item1.Name .. " + " .. item2.Name)
+            end
+            
+            local success = SimulateDrag(item1, item2)
+            if success then
+                wait(0.2 / MergeSpeed)
             end
         end
         
         attempts = attempts + 1
-        wait(0.5 / MergeSpeed)
+        wait(0.3 / MergeSpeed)
     end
     
     IsMerging = false
 end
 
--- ─── FIND ALL COMBINATIONS ─────────────────────────────────────────────
+-- ─── GET ITEM LIST DISPLAY ────────────────────────────────────────────
 
-local function GetFullCombinationTree()
-    -- Scan game for all combination possibilities
-    local combinations = {}
+local function GetItemListDisplay()
+    local items = GetAllGameItems()
+    local text = ""
+    local grouped = {}
     
-    for _, v in ipairs(Workspace:GetDescendants()) do
-        if v:IsA("Model") and v:FindFirstChild("Combination") then
-            local combo = v:FindFirstChild("Combination")
-            if combo:IsA("StringValue") then
-                local parts = combo.Value:split("+")
-                if #parts == 2 then
-                    table.insert(combinations, {
-                        Input1 = parts[1]:gsub(" ", ""),
-                        Input2 = parts[2]:gsub(" ", ""),
-                        Output = v.Name
-                    })
-                end
-            end
+    for _, item in ipairs(items) do
+        local key = item.Type .. " (Tier " .. item.Tier .. ")"
+        if not grouped[key] then
+            grouped[key] = 0
         end
+        grouped[key] = grouped[key] + 1
     end
     
-    return combinations
+    for key, count in pairs(grouped) do
+        text = text .. key .. ": " .. count .. "x\n"
+    end
+    
+    if text == "" then
+        text = "No items found on board"
+    end
+    
+    return text
 end
 
 -- ─── CREATE UI ──────────────────────────────────────────────────────────
@@ -304,10 +296,11 @@ local Window = Rayfield:CreateWindow({
 })
 
 local MainTab = Window:CreateTab("Auto Merge")
-local CombosTab = Window:CreateTab("Combinations")
+local ItemsTab = Window:CreateTab("Items")
+local DebugTab = Window:CreateTab("Debug")
 local SettingsTab = Window:CreateTab("Settings")
 
--- ─── AUTO MERGE TOGGLE ─────────────────────────────────────────────────
+-- ─── AUTO MERGE ─────────────────────────────────────────────────────────
 
 local AutoMergeToggle = MainTab:CreateToggle({
     Name = "Auto Merge",
@@ -318,13 +311,13 @@ local AutoMergeToggle = MainTab:CreateToggle({
         if Value then
             Rayfield:Notify({
                 Title = "Auto Merge",
-                Content = "Enabled",
+                Content = "Enabled - Scanning for items...",
                 Duration = 2
             })
             spawn(function()
                 while AutoMergeEnabled do
                     ProcessMerges()
-                    wait(1)
+                    wait(0.5)
                 end
             end)
         else
@@ -338,8 +331,6 @@ local AutoMergeToggle = MainTab:CreateToggle({
     end
 })
 
--- ─── MERGE SPEED ──────────────────────────────────────────────────────
-
 local MergeSpeedSlider = MainTab:CreateSlider({
     Name = "Merge Speed",
     Range = {1, 10},
@@ -352,109 +343,146 @@ local MergeSpeedSlider = MainTab:CreateSlider({
     end
 })
 
--- ─── SCAN BUTTONS ─────────────────────────────────────────────────────
-
-local ScanItemsButton = MainTab:CreateButton({
-    Name = "Scan for Items",
+local MergeNowButton = MainTab:CreateButton({
+    Name = "Merge Now (Single Pass)",
     Callback = function()
-        local items = GetAllItems()
+        if not IsMerging then
+            spawn(function()
+                ProcessMerges()
+                Rayfield:Notify({
+                    Title = "Merge Pass",
+                    Content = "Completed",
+                    Duration = 2
+                })
+            end)
+        else
+            Rayfield:Notify({
+                Title = "Busy",
+                Content = "Already merging",
+                Duration = 1
+            })
+        end
+    end
+})
+
+-- ─── ITEMS TAB ──────────────────────────────────────────────────────────
+
+local ItemListLabel = ItemsTab:CreateParagraph({
+    Title = "Items on Board",
+    Content = GetItemListDisplay()
+})
+
+local RefreshItemsButton = ItemsTab:CreateButton({
+    Name = "Refresh Item List",
+    Callback = function()
+        ItemListLabel:SetContent(GetItemListDisplay())
+        local items = GetAllGameItems()
+        Rayfield:Notify({
+            Title = "Refreshed",
+            Content = "Found " .. #items .. " items",
+            Duration = 2
+        })
+    end
+})
+
+local ScanAllButton = ItemsTab:CreateButton({
+    Name = "Full Game Scan",
+    Callback = function()
+        local items = GetAllGameItems()
+        local text = ""
+        for _, item in ipairs(items) do
+            text = text .. item.Name .. " [Tier " .. item.Tier .. "] - " .. tostring(item.Position) .. "\n"
+        end
+        if text == "" then
+            text = "No items found"
+        end
+        ItemListLabel:SetContent(text)
         Rayfield:Notify({
             Title = "Scan Complete",
             Content = "Found " .. #items .. " items",
             Duration = 2
         })
-        print("Items found:")
-        for _, v in ipairs(items) do
-            print(" - " .. v.Name)
-        end
     end
 })
 
-local ScanCombosButton = MainTab:CreateButton({
-    Name = "Scan Combinations",
-    Callback = function()
-        local combos = GetFullCombinationTree()
-        if #combos > 0 then
-            Rayfield:Notify({
-                Title = "Combinations Found",
-                Content = "Found " .. #combos .. " combinations",
-                Duration = 2
-            })
-        else
-            Rayfield:Notify({
-                Title = "No Combos",
-                Content = "No combination data found in game",
-                Duration = 2
-            })
-        end
-    end
-})
+-- ─── DEBUG TAB ──────────────────────────────────────────────────────────
 
--- ─── COMBINATIONS LIST ─────────────────────────────────────────────────
-
-local CombosList = CombosTab:CreateParagraph({
-    Title = "Known Combinations",
-    Content = "Scan game to find combinations"
-})
-
-local RefreshCombosButton = CombosTab:CreateButton({
-    Name = "Refresh Combinations",
-    Callback = function()
-        local combos = GetFullCombinationTree()
-        local text = ""
-        for _, c in ipairs(combos) do
-            text = text .. c.Input1 .. " + " .. c.Input2 .. " → " .. c.Output .. "\n"
-        end
-        if text == "" then
-            text = "No combinations found\n\nTry scanning the game board"
-        end
-        CombosList:SetContent(text)
+local DebugToggle = DebugTab:CreateToggle({
+    Name = "Debug Mode",
+    CurrentValue = false,
+    Flag = "DebugToggle",
+    Callback = function(Value)
+        DebugMode = Value
         Rayfield:Notify({
-            Title = "Combinations",
-            Content = "Updated",
+            Title = "Debug",
+            Content = Value and "Enabled" or "Disabled",
             Duration = 2
         })
     end
 })
 
--- ─── FIND BOARD ──────────────────────────────────────────────────────
+local DebugInfo = DebugTab:CreateParagraph({
+    Title = "Debug Info",
+    Content = "Press 'Scan Debug' to update"
+})
 
-local FindBoardButton = SettingsTab:CreateButton({
-    Name = "Find Game Board",
+local ScanDebugButton = DebugTab:CreateButton({
+    Name = "Scan Debug",
     Callback = function()
-        GameBoard = FindGameBoard()
-        if GameBoard then
-            Rayfield:Notify({
-                Title = "Board Found",
-                Content = GameBoard.Name,
-                Duration = 2
-            })
-        else
-            Rayfield:Notify({
-                Title = "Board Not Found",
-                Content = "Using workspace fallback",
-                Duration = 2
-            })
+        local items = GetAllGameItems()
+        local pairs = FindMergePairs()
+        
+        local info = ""
+        info = info .. "Items Found: " .. #items .. "\n"
+        info = info .. "Merge Pairs: " .. #pairs .. "\n"
+        info = info .. "Board: " .. (Workspace:FindFirstChild("Board") and "Found" or "Not Found") .. "\n"
+        info = info .. "ReplicatedStorage Remotes: "
+        
+        local remoteCount = 0
+        for _, v in ipairs(ReplicatedStorage:GetDescendants()) do
+            if v:IsA("RemoteEvent") or v:IsA("RemoteFunction") then
+                remoteCount = remoteCount + 1
+            end
         end
+        info = info .. remoteCount
+        
+        DebugInfo:SetContent(info)
+        
+        print("=== Debug Info ===")
+        print("Items:", #items)
+        print("Merge Pairs:", #pairs)
+        for _, pair in ipairs(pairs) do
+            print("  " .. pair[1].Name .. " + " .. pair[2].Name)
+        end
+        print("===================")
+        
+        Rayfield:Notify({
+            Title = "Debug",
+            Content = "Found " .. #items .. " items, " .. #pairs .. " pairs",
+            Duration = 3
+        })
     end
 })
 
--- ─── CREDITS ──────────────────────────────────────────────────────────
+-- ─── SETTINGS TAB ──────────────────────────────────────────────────────
 
 local CreditsLabel = SettingsTab:CreateParagraph({
     Title = "Drag to Combine Hub",
-    Content = "by The Invisible Man\nKey: Zkiller\nAuto merges all items on board"
+    Content = "by The Invisible Man\nKey: Zkiller\nAuto merges all items on the board"
 })
 
--- ─── AUTO REFRESH LOOP ─────────────────────────────────────────────────
+-- ─── AUTO REFRESH ──────────────────────────────────────────────────────
 
 spawn(function()
     while true do
-        wait(5)
+        wait(10)
         if AutoMergeEnabled and not IsMerging then
             spawn(function()
                 ProcessMerges()
             end)
+        end
+        if not AutoMergeEnabled then
+            ItemListLabel:SetContent(GetItemListDisplay())
         end
     end
 end)
@@ -467,4 +495,4 @@ Rayfield:Notify({
     Duration = 3
 })
 
-print("[DragCombine] Loaded | Key: Zkiller")
+print("[Merge] Loaded | Key: Zkiller")
